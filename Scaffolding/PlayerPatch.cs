@@ -34,48 +34,54 @@ public static class PlayerPatches
             transpiler: h_transpiler != null ? new HarmonyMethod(h_transpiler) : null);
     }
 
-    private static IEnumerable<CodeInstruction> ClimbingTranspiler(IEnumerable<CodeInstruction> instructions)
+    private static IEnumerable<CodeInstruction> ClimbingTranspiler(IEnumerable<CodeInstruction> instructions, ILGenerator generator)
     {
         var codes = new List<CodeInstruction>(instructions);
         var getCollisionBoxes = AccessTools.Method(typeof(Block), nameof(Block.GetCollisionBoxes), new[] { typeof(IBlockAccessor), typeof(BlockPos) });
-        var getBlock = AccessTools.Method(typeof(IBlockAccessor), nameof(IBlockAccessor.GetBlock), new[] { typeof(BlockPos), typeof(int) });
         var injectMethod = AccessTools.Method(typeof(PlayerPatches), nameof(InjectCustomCollisionBoxes));
-        var counter = 0; // used to tell at which GetCollisionBox call we are
+
+        var capturedBlock = generator.DeclareLocal(typeof(Block));
+
+        // Pre-scan: find method calls (e.g. GetBlock) whose return value feeds a
+        // GetCollisionBoxes call. For those we need dup+stloc to capture the Block
+        // since we can't replay a method call after the fact.
+        // The Block instance is always 3 instructions before the callvirt:
+        //   [i-3] load Block  [i-2] load IBlockAccessor  [i-1] load BlockPos  [i] callvirt
+        var methodCallSources = new HashSet<int>();
+
+        for (int i = 3; i < codes.Count; i++)
+        {
+            if (codes[i].opcode == OpCodes.Callvirt && codes[i].operand is MethodInfo mi && mi == getCollisionBoxes)
+            {
+                var blockLoad = codes[i - 3];
+                if (blockLoad.opcode == OpCodes.Call || blockLoad.opcode == OpCodes.Callvirt)
+                {
+                    methodCallSources.Add(i - 3);
+                }
+            }
+        }
 
         for (int i = 0; i < codes.Count; i++)
         {
-            var code = codes[i];
-            yield return code;
+            yield return codes[i];
 
-            if (counter == 1 && (code.opcode == OpCodes.Callvirt || code.opcode == OpCodes.Call) && code.operand is MethodInfo mj && mj == getBlock)
+            if (methodCallSources.Contains(i))
             {
-                yield return new CodeInstruction(OpCodes.Stloc, 26);
-                yield return new CodeInstruction(OpCodes.Ldloc, 26);
+                yield return new CodeInstruction(OpCodes.Dup);
+                yield return new CodeInstruction(OpCodes.Stloc, capturedBlock);
             }
 
-            if (code.opcode == OpCodes.Callvirt && code.operand is MethodInfo mi && mi == getCollisionBoxes)
+            if (codes[i].opcode == OpCodes.Callvirt && codes[i].operand is MethodInfo mi && mi == getCollisionBoxes)
             {
-                switch (counter)
-                {
-                    case 0:
-                        yield return new CodeInstruction(OpCodes.Ldloc, 26);
-                        break;
-                    case 1:
-                        yield return new CodeInstruction(OpCodes.Ldloc, 26);
-                        break;
-                    case 2:
-                        yield return new CodeInstruction(OpCodes.Ldloc, 36);
-                        break;
-                    default:
-                        break;
-                }
-                yield return new CodeInstruction(OpCodes.Ldloc_2);
-                yield return new CodeInstruction(OpCodes.Ldloc, 4);
-                yield return new CodeInstruction(OpCodes.Ldarg_0);
+                if (methodCallSources.Contains(i - 3))
+                    yield return new CodeInstruction(OpCodes.Ldloc, capturedBlock);
+                else
+                    yield return new CodeInstruction(codes[i - 3].opcode, codes[i - 3].operand);
 
-                // Call the helper method: InjectCustomCollisionBoxes(Cuboidf[], Block, IBlockAccessor, BlockPos)
+                yield return new CodeInstruction(codes[i - 2].opcode, codes[i - 2].operand);
+                yield return new CodeInstruction(codes[i - 1].opcode, codes[i - 1].operand);
+                yield return new CodeInstruction(OpCodes.Ldarg_0);
                 yield return new CodeInstruction(OpCodes.Call, injectMethod);
-                counter++;
             }
         }
     }

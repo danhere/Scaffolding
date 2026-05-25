@@ -3,11 +3,12 @@
     "modid": "scaffolding",
     "name": "Scaffolding",
     "authors": [
-        "123Gurkensalat"
+        "123Gurkensalat",
+        "danhere"
     ],
     "description": "Adds scaffolding to the game!",
-    "version": "1.2.4",
+    "version": "1.3.0",
     "dependencies": {
-        "game": ""
+        "game": "1.22.0"
     }
 }

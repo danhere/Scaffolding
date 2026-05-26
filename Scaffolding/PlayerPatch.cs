@@ -42,17 +42,16 @@ public static class PlayerPatches
 
         var capturedBlock = generator.DeclareLocal(typeof(Block));
 
-        // Pre-scan: find method calls (e.g. GetBlock) whose return value feeds a
-        // GetCollisionBoxes call. For those we need dup+stloc to capture the Block
-        // since we can't replay a method call after the fact.
-        // The Block instance is always 3 instructions before the callvirt:
-        //   [i-3] load Block  [i-2] load IBlockAccessor  [i-1] load BlockPos  [i] callvirt
+        // Pre-scan: find all GetCollisionBoxes call sites and identify which ones
+        // have a method call (e.g. GetBlock) as the block source
         var methodCallSources = new HashSet<int>();
+        var collisionCallIndices = new List<int>();
 
         for (int i = 3; i < codes.Count; i++)
         {
             if (codes[i].opcode == OpCodes.Callvirt && codes[i].operand is MethodInfo mi && mi == getCollisionBoxes)
             {
+                collisionCallIndices.Add(i);
                 var blockLoad = codes[i - 3];
                 if (blockLoad.opcode == OpCodes.Call || blockLoad.opcode == OpCodes.Callvirt)
                 {
@@ -60,6 +59,11 @@ public static class PlayerPatches
                 }
             }
         }
+
+        // The second GetCollisionBoxes is a lookahead collision check — skip it
+        var skipIndices = new HashSet<int>();
+        if (collisionCallIndices.Count >= 2)
+            skipIndices.Add(collisionCallIndices[1]);
 
         for (int i = 0; i < codes.Count; i++)
         {
@@ -71,36 +75,30 @@ public static class PlayerPatches
                 yield return new CodeInstruction(OpCodes.Stloc, capturedBlock);
             }
 
-            if (codes[i].opcode == OpCodes.Callvirt && codes[i].operand is MethodInfo mi && mi == getCollisionBoxes)
+            if (codes[i].opcode == OpCodes.Callvirt && codes[i].operand is MethodInfo mi
+                && mi == getCollisionBoxes && !skipIndices.Contains(i))
             {
                 if (methodCallSources.Contains(i - 3))
                     yield return new CodeInstruction(OpCodes.Ldloc, capturedBlock);
                 else
                     yield return new CodeInstruction(codes[i - 3].opcode, codes[i - 3].operand);
 
-                yield return new CodeInstruction(codes[i - 2].opcode, codes[i - 2].operand);
-                yield return new CodeInstruction(codes[i - 1].opcode, codes[i - 1].operand);
                 yield return new CodeInstruction(OpCodes.Ldarg_0);
+                yield return new CodeInstruction(OpCodes.Ldloc_0);
+                yield return new CodeInstruction(OpCodes.Ldarg_2);
                 yield return new CodeInstruction(OpCodes.Call, injectMethod);
             }
         }
     }
 
-    /// <summary>
-    /// Receives the original collision boxes and the block instance
-    /// </summary>
-    public static Cuboidf[] InjectCustomCollisionBoxes(Cuboidf[] original, Block block, IBlockAccessor accessor, BlockPos pos, object instance)
+    public static Cuboidf[] InjectCustomCollisionBoxes(Cuboidf[] original, Block block, object instance, Entity entity, EntityControls controls)
     {
         if (instance is not EntityBehaviorPlayerPhysics) return original;
+        if (block == null || entity == null || controls == null) return original;
+        if (!block.WildCardMatch("scaffolding-*-*")) return original;
 
-        if (block == null || accessor == null || pos == null) return original;
-
-        if (block.WildCardMatch("scaffolding-*-*"))
-        {
-            var merged = new List<Cuboidf>(original ?? new Cuboidf[0]);
-            merged.AddRange(block.GetSelectionBoxes(accessor, pos));
-            return merged.ToArray();
-        }
+        controls.IsClimbing = true;
+        entity.ClimbingOnFace = null;
 
         return original;
     }
